@@ -1,4 +1,6 @@
+/*
 package drone;
+
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -142,3 +144,4 @@ public class FlightPlanner {
         return totalJ;
     }
 }
+*/
