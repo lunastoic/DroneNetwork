@@ -5,29 +5,32 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * 3D route planning that supports multiple approaches:
- *   1) Basic Greedy (similar to FlightPlanner.planRoute)
- *   2) Energy-Based Greedy
+ * 3D route planning that supports three approaches:
+ *   1) Basic Greedy (nearest neighbor based on distance)
+ *   2) Energy-Based Greedy (minimizing energy cost with vertical movement)
  *   3) MST-based TSP Approximation
- *   4) Metaheuristic (placeholder; currently falls back to energy-based)
  */
 public class Algorithms3D {
 
-    // Common constants
-    private static final double ARC_PEAK = 50.0;
-    private static final int ARC_SAMPLES = 50;
-    private static final double ONE_GALLON_KG = 3.785;
-    private static final double WATER_PER_FIRE = ONE_GALLON_KG;
-    private static final double HOVER_FIRE = 30.0;    // seconds for fire hover
-    private static final double HOVER_REFILL = 60.0;  // seconds for refill hover
-    private static final double CRUISE_SPEED = 15.0;  // m/s horizontal
-    private static final double VERT_SPEED = 5.0;     // m/s vertical
-    private static final double POWER_PER_KG = 200;   // W per kg
-    private static final double DRONE_EMPTY = 10.0;   // kg
+    // Constants updated with DJI FlyCart 30 specs
+    private static final double ARC_PEAK = 50.0;          // Reasonable flight height (m)
+    private static final int ARC_SAMPLES = 50;            // Number of arc points
+    private static final double ONE_GALLON_KG = 3.785;    // kg per gallon
+    private static final double WATER_PER_FIRE = ONE_GALLON_KG;  // Water per fire (kg)
+    private static final double HOVER_FIRE = 30.0;        // seconds for fire hover
+    private static final double HOVER_REFILL = 60.0;      // seconds for refill hover (updated to 1 minute)
+    private static final double HOVER_BATTERY_REPLACE = 30.0; // seconds for battery replacement
+    private static final double CRUISE_SPEED = 20.0;      // m/s (FlyCart 30 max speed)
+    private static final double VERT_SPEED = 5.0;         // m/s vertical speed
+    private static final double POWER_PER_KG = 200;       // W per kg
+    private static final double DRONE_EMPTY = 10.0;       // kg (assumed drone weight)
+    private static final double MAX_WATER_PAYLOAD = 20.0; // kg (within 30 kg dual battery payload limit)
+    private static final double INITIAL_BATTERY = 3969.0; // Wh (FlyCart 30 battery)
+    private static final double BATTERY_THRESHOLD = INITIAL_BATTERY * 0.05; // 5% threshold (~198.45 Wh)
 
     /**
      * Main entry for route planning.
-     * methodChoice: 1 = Basic Greedy, 2 = Energy-Based, 3 = MST, 4 = Metaheuristic.
+     * methodChoice: 1 = Basic Greedy, 2 = Energy-Based Greedy, 3 = MST-based TSP Approximation.
      */
     public static List<SpatialNode> planRoute(
             int methodChoice,
@@ -37,6 +40,10 @@ public class Algorithms3D {
             List<RendezvousPoint> rendezvous,
             double fullWaterKg
     ) {
+        if (fullWaterKg > MAX_WATER_PAYLOAD) {
+            System.out.println("Warning: Water payload exceeds FlyCart 30 max (20 kg). Adjusting to 20 kg.");
+            fullWaterKg = MAX_WATER_PAYLOAD;
+        }
         switch (methodChoice) {
             case 1:
                 return basicGreedyRoute(depot, fires, rendezvous, fullWaterKg);
@@ -44,14 +51,13 @@ public class Algorithms3D {
                 return energyBasedRoute(graph, depot, fires, rendezvous, fullWaterKg);
             case 3:
                 return mstTspApprox(graph, depot, fires, rendezvous, fullWaterKg);
-            case 4:
             default:
-                System.out.println("Metaheuristic approach not implemented; using Energy-Based approach.");
-                return energyBasedRoute(graph, depot, fires, rendezvous, fullWaterKg);
+                System.out.println("Invalid choice; using Basic Greedy as default.");
+                return basicGreedyRoute(depot, fires, rendezvous, fullWaterKg);
         }
     }
 
-    // ----------------- 1) Basic Greedy -----------------
+    // ----------------- 1) Basic Greedy (Nearest Neighbor) -----------------
     private static List<SpatialNode> basicGreedyRoute(
             DroneNode depot,
             List<FireSite> fires,
@@ -60,25 +66,70 @@ public class Algorithms3D {
     ) {
         List<SpatialNode> route = new ArrayList<>();
         double water = fullWaterKg;
+        double battery = INITIAL_BATTERY * 3600.0; // Convert Wh to Joules (1 Wh = 3600 J)
         SpatialNode current = new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "DepotStart");
         route.add(current);
+        List<FireSite> unvisited = new ArrayList<>(fires);
 
-        // Sort fires by X coordinate (simple ordering)
-        List<FireSite> sortedFires = new ArrayList<>(fires);
-        sortedFires.sort(Comparator.comparingDouble(FireSite::getX));
+        while (!unvisited.isEmpty()) {
+            // Estimate energy cost to the next fire site
+            FireSite nextFire = null;
+            double minDist = Double.MAX_VALUE;
+            double minDistEnergy = Double.MAX_VALUE;
+            for (FireSite fs : unvisited) {
+                double dist = horizDist(current, fs);
+                double energy = estimateEnergyCost(current, fs, water);
+                if (dist < minDist) {
+                    minDist = dist;
+                    nextFire = fs;
+                    minDistEnergy = energy;
+                }
+            }
 
-        for (FireSite fire : sortedFires) {
+            // Check if battery is sufficient for the next leg
+            if (battery - minDistEnergy < BATTERY_THRESHOLD * 3600.0) {
+                // Battery too low; return to depot for replacement
+                route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
+                route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+                battery = INITIAL_BATTERY * 3600.0; // Reset battery
+                current = depot;
+            }
+
+            // Check if water is sufficient
             if (water < WATER_PER_FIRE) {
                 RendezvousPoint refill = findNearestRefill(current, rendezvous);
+                double energyToRefill = estimateEnergyCost(current, refill, water);
+                if (battery - energyToRefill < BATTERY_THRESHOLD * 3600.0) {
+                    // Battery too low; return to depot first
+                    route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
+                    route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+                    battery = INITIAL_BATTERY * 3600.0;
+                    current = depot;
+                }
                 route.addAll(createArc(current, refill, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover30sRefill"));
+                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover60sRefill"));
+                battery -= energyToRefill + HOVER_REFILL * (DRONE_EMPTY + water) * POWER_PER_KG;
                 water = fullWaterKg;
                 current = refill;
             }
-            route.addAll(createArc(current, fire, ARC_PEAK, ARC_SAMPLES));
-            route.add(new Waypoint(fire.getX(), fire.getY(), fire.getZ(), "Hover30sFire"));
+
+            // Travel to the fire site
+            route.addAll(createArc(current, nextFire, ARC_PEAK, ARC_SAMPLES));
+            route.add(new Waypoint(nextFire.getX(), nextFire.getY(), nextFire.getZ(), "Hover30sFire"));
+            battery -= minDistEnergy + HOVER_FIRE * (DRONE_EMPTY + water) * POWER_PER_KG;
             water = Math.max(0, water - WATER_PER_FIRE);
-            current = fire;
+            current = nextFire;
+            unvisited.remove(nextFire);
+        }
+
+        // Final return to depot
+        double energyToDepot = estimateEnergyCost(current, depot, water);
+        if (battery - energyToDepot < BATTERY_THRESHOLD * 3600.0) {
+            // Battery too low; replace before returning
+            route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
+            route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+            battery = INITIAL_BATTERY * 3600.0;
+            current = depot;
         }
         route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
         return route;
@@ -94,6 +145,7 @@ public class Algorithms3D {
     ) {
         List<SpatialNode> route = new ArrayList<>();
         double water = fullWaterKg;
+        double battery = INITIAL_BATTERY * 3600.0; // Convert Wh to Joules
         SpatialNode currentPos = new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "DepotStart");
         route.add(currentPos);
         List<FireSite> unvisited = new ArrayList<>(fires);
@@ -108,18 +160,44 @@ public class Algorithms3D {
                     nextFire = fs;
                 }
             }
+
+            if (battery - minEnergy < BATTERY_THRESHOLD * 3600.0) {
+                route.addAll(createArc(currentPos, depot, ARC_PEAK, ARC_SAMPLES));
+                route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+                battery = INITIAL_BATTERY * 3600.0;
+                currentPos = depot;
+            }
+
             if (water < WATER_PER_FIRE) {
                 RendezvousPoint refill = findNearestRefill(currentPos, rendezvous);
+                double energyToRefill = estimateEnergyCost(currentPos, refill, water);
+                if (battery - energyToRefill < BATTERY_THRESHOLD * 3600.0) {
+                    route.addAll(createArc(currentPos, depot, ARC_PEAK, ARC_SAMPLES));
+                    route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+                    battery = INITIAL_BATTERY * 3600.0;
+                    currentPos = depot;
+                }
                 route.addAll(createArc(currentPos, refill, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover30sRefill"));
+                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover60sRefill"));
+                battery -= energyToRefill + HOVER_REFILL * (DRONE_EMPTY + water) * POWER_PER_KG;
                 water = fullWaterKg;
                 currentPos = refill;
             }
+
             route.addAll(createArc(currentPos, nextFire, ARC_PEAK, ARC_SAMPLES));
             route.add(new Waypoint(nextFire.getX(), nextFire.getY(), nextFire.getZ(), "Hover30sFire"));
+            battery -= minEnergy + HOVER_FIRE * (DRONE_EMPTY + water) * POWER_PER_KG;
             water = Math.max(0, water - WATER_PER_FIRE);
             currentPos = nextFire;
             unvisited.remove(nextFire);
+        }
+
+        double energyToDepot = estimateEnergyCost(currentPos, depot, water);
+        if (battery - energyToDepot < BATTERY_THRESHOLD * 3600.0) {
+            route.addAll(createArc(currentPos, depot, ARC_PEAK, ARC_SAMPLES));
+            route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+            battery = INITIAL_BATTERY * 3600.0;
+            currentPos = depot;
         }
         route.addAll(createArc(currentPos, depot, ARC_PEAK, ARC_SAMPLES));
         return route;
@@ -127,11 +205,14 @@ public class Algorithms3D {
 
     private static double estimateEnergyCost(SpatialNode start, SpatialNode end, double water) {
         double dx = end.getX() - start.getX();
+        double dy = end.getY() - start.getY();
         double dz = end.getZ() - start.getZ();
         double distHoriz = Math.sqrt(dx * dx + dz * dz);
-        double tFlight = distHoriz / CRUISE_SPEED;
+        double distVert = Math.abs(dy);
+        double tHoriz = distHoriz / CRUISE_SPEED;
+        double tVert = distVert / VERT_SPEED;
         double weight = DRONE_EMPTY + water;
-        return tFlight * weight * POWER_PER_KG;
+        return (tHoriz + tVert) * weight * POWER_PER_KG;
     }
 
     // ----------------- 3) MST-Based TSP Approximation -----------------
@@ -152,24 +233,52 @@ public class Algorithms3D {
 
         List<SpatialNode> route = new ArrayList<>();
         double water = fullWaterKg;
+        double battery = INITIAL_BATTERY * 3600.0;
         SpatialNode current = new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "DepotStart");
         route.add(current);
 
         for (int i = 1; i < nodeOrder.size(); i++) {
             SpatialNode next = nodeOrder.get(i);
+            double energyToNext = estimateEnergyCost(current, next, water);
+            if (battery - energyToNext < BATTERY_THRESHOLD * 3600.0) {
+                route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
+                route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+                battery = INITIAL_BATTERY * 3600.0;
+                current = depot;
+            }
+
             if (water < WATER_PER_FIRE) {
                 RendezvousPoint refill = findNearestRefill(current, rendezvous);
+                double energyToRefill = estimateEnergyCost(current, refill, water);
+                if (battery - energyToRefill < BATTERY_THRESHOLD * 3600.0) {
+                    route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
+                    route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+                    battery = INITIAL_BATTERY * 3600.0;
+                    current = depot;
+                }
                 route.addAll(createArc(current, refill, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover30sRefill"));
+                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover60sRefill"));
+                battery -= energyToRefill + HOVER_REFILL * (DRONE_EMPTY + water) * POWER_PER_KG;
                 water = fullWaterKg;
                 current = refill;
             }
+
             route.addAll(createArc(current, next, ARC_PEAK, ARC_SAMPLES));
+            battery -= energyToNext;
             if (next instanceof FireSite) {
                 route.add(new Waypoint(next.getX(), next.getY(), next.getZ(), "Hover30sFire"));
+                battery -= HOVER_FIRE * (DRONE_EMPTY + water) * POWER_PER_KG;
                 water = Math.max(0, water - WATER_PER_FIRE);
             }
             current = next;
+        }
+
+        double energyToDepot = estimateEnergyCost(current, depot, water);
+        if (battery - energyToDepot < BATTERY_THRESHOLD * 3600.0) {
+            route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
+            route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
+            battery = INITIAL_BATTERY * 3600.0;
+            current = depot;
         }
         route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
         return route;
@@ -253,18 +362,6 @@ public class Algorithms3D {
         }
     }
 
-    // ----------------- 4) Metaheuristic Placeholder -----------------
-    private static List<SpatialNode> metaheuristicPlaceholder(
-            Graph3D graph,
-            DroneNode depot,
-            List<FireSite> fires,
-            List<RendezvousPoint> rendezvous,
-            double fullWaterKg
-    ) {
-        System.out.println("Metaheuristic approach not implemented; using Energy-Based approach.");
-        return energyBasedRoute(graph, depot, fires, rendezvous, fullWaterKg);
-    }
-
     // ----------------- Common Helper Methods -----------------
     private static List<SpatialNode> createArc(SpatialNode start, SpatialNode end, double arcPeak, int numSamples) {
         List<SpatialNode> arcPoints = new ArrayList<>();
@@ -296,15 +393,15 @@ public class Algorithms3D {
 
     /**
      * Calculate energy consumption along the route.
-     * Instead of printing every leg's detail, this method prints a summary at each key node
-     * (i.e. when hovering at a fire or refill, or at the depot).
+     * Prints a summary at each key node (hover at fire/refill, battery replace, or depot).
      */
     public static double calculateEnergyForRoute(List<SpatialNode> route, double fullWaterKg) {
         double totalJoules = 0;
         double water = fullWaterKg;
         double totalDistance = 0;
         double cumulativeFlightTime = 0;
-        double initialBattery = 3969.0; // Wh
+        double initialBattery = INITIAL_BATTERY; // Wh
+        double currentBattery = initialBattery * 3600.0; // Joules
         System.out.println("\n--- Drone Mission Summary ---");
         for (int i = 0; i < route.size() - 1; i++) {
             SpatialNode from = route.get(i);
@@ -331,15 +428,22 @@ public class Algorithms3D {
             if (label.contains("Hover30sFire")) {
                 legJoules += HOVER_FIRE * weight * POWER_PER_KG;
                 water = Math.max(0, water - WATER_PER_FIRE);
-            } else if (label.contains("Hover30sRefill")) {
+            } else if (label.contains("Hover60sRefill")) {
                 legJoules += HOVER_REFILL * weight * POWER_PER_KG;
                 water = fullWaterKg;
+            } else if (label.contains("Hover30sBatteryReplace")) {
+                legJoules += HOVER_BATTERY_REPLACE * weight * POWER_PER_KG;
+                currentBattery = initialBattery * 3600.0; // Reset battery
             }
             totalJoules += legJoules;
-            // Print summary only for key nodes
-            if (label.contains("Hover30sFire") || label.contains("Hover30sRefill") || label.contains("DepotStart")) {
+            currentBattery -= legJoules;
+            if (currentBattery < 0) {
+                System.out.println("Warning: Battery went negative during simulation!");
+                currentBattery = 0;
+            }
+            if (label.contains("Hover30sFire") || label.contains("Hover60sRefill") || label.contains("DepotStart") || label.contains("Hover30sBatteryReplace")) {
                 double whConsumed = totalJoules / 3600.0;
-                double batteryLeft = initialBattery - whConsumed;
+                double batteryLeft = currentBattery / 3600.0;
                 double waterUsed = fullWaterKg - water;
                 System.out.printf("Node %2d (%s): Pos(%.1f, %.1f, %.1f) | Total Distance: %.1f m | Flight Time: %.1f s | Battery Consumed: %.2f Wh | Battery Left: %.2f Wh | Water Used: %.2f kg | Water Left: %.2f kg\n",
                         i, label, to.getX(), to.getY(), to.getZ(), totalDistance, cumulativeFlightTime, whConsumed, batteryLeft, waterUsed, water);
@@ -348,6 +452,3 @@ public class Algorithms3D {
         return totalJoules;
     }
 }
-
-
-
