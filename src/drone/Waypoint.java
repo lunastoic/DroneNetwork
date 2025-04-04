@@ -1,33 +1,33 @@
- package drone;
+package drone;
 
-/**
- * A sub-waypoint on the final 3D flight path (for arc sampling or hover).
- */
-public class Waypoint implements SpatialNode {
-    private double x, y, z;
+public class Waypoint extends SpatialNode {
     private String label;
+    private double weight; // Weight at the time of visit (for adaptability)
 
     public Waypoint(double x, double y, double z, String label) {
-        this.x = x;
-        this.y = y;
-        this.z = z;
+        super(x, y, z);
         this.label = label;
+        this.weight = 0; // Default weight for non-service waypoints
     }
 
-    public String getLabel() { return label; }
+    public Waypoint(double x, double y, double z, String label, double weight) {
+        super(x, y, z);
+        this.label = label;
+        this.weight = weight;
+    }
 
-    @Override
-    public double getX() { return x; }
-    @Override
-    public double getY() { return y; }
-    @Override
-    public double getZ() { return z; }
+    public String getLabel() {
+        return label;
+    }
 
-    @Override
-    public String toString() {
-        return "Waypoint{" + label + " (" + x + ", " + y + ", " + z + ")}";
+    public double getWeight() {
+        return weight;
+    }
+
+    // Add a method to get payload weight (for energy calculations)
+    public double getPayloadWeight() {
+        // This is a simplification; in a real scenario, payload might vary per waypoint
+        // For now, assume payload is set by the caller (DroneEmergencySim)
+        return 0; // Will be set by DroneEmergencySim via totalWeight
     }
 }
-
-
-

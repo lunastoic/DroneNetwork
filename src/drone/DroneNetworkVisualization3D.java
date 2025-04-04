@@ -2,7 +2,6 @@ package drone;
 
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.geometry.Insets;
 import javafx.scene.*;
 import javafx.scene.input.*;
 import javafx.scene.paint.Color;
@@ -24,32 +23,20 @@ public class DroneNetworkVisualization3D extends Application {
     private static List<SpatialNode> route;
     private static boolean isRunning = false;
 
-    // Camera orbit parameters
     private PerspectiveCamera camera;
-    private double cameraDistance = 600; // Initial distance
-    private double angleX = -90; // Changed to -90 for top-down view
-    private double angleY = 0;   // Initial horizontal angle
-    private double pivotX, pivotY, pivotZ; // Pivot point
+    private double cameraDistance = 600;
+    private double angleX = -90;
+    private double angleY = 0;
+    private double pivotX, pivotY, pivotZ;
 
-    // For dragging
     private double anchorX, anchorY;
     private double anchorAngleX, anchorAngleY;
     private double anchorPanX, anchorPanZ;
-    private double anchorDistance; // For zoom with middle click
+    private double anchorDistance;
 
-    // Constants from FlightPlanner for energy simulation
-    private static final double DRONE_EMPTY = 10.0;
-    private static final double ONE_GALLON_KG = 3.785;
-    private static final double WATER_PER_FIRE = ONE_GALLON_KG;
-    private static final double HOVER_FIRE = 30.0;
-    private static final double HOVER_REFILL = 60.0;
-    private static final double CRUISE_SPEED = 15.0;
-    private static final double POWER_PER_KG = 200;
-    private static final double FULL_WATER_KG = 8 * ONE_GALLON_KG;
-    private static final double INITIAL_BATTERY = 3969;
-    private static final double ROTATION_SENSITIVITY = 0.1; // Reduced sensitivity for smoother rotation
-    private static final double PAN_SENSITIVITY = 0.2;      // Reduced sensitivity for smoother panning
-    private static final double ZOOM_SENSITIVITY = 0.2;     // Granular zoom control
+    private static final double ROTATION_SENSITIVITY = 0.1;
+    private static final double PAN_SENSITIVITY = 0.2;
+    private static final double ZOOM_SENSITIVITY = 0.2;
 
     public static void launchVisualizer(Graph3D g, List<SpatialNode> r) {
         if (g == null || r == null) {
@@ -78,7 +65,6 @@ public class DroneNetworkVisualization3D extends Application {
     public void start(Stage primaryStage) {
         Group root = new Group();
 
-        // Add lighting
         AmbientLight ambient = new AmbientLight(Color.WHITE);
         PointLight light = new PointLight(Color.WHITE);
         light.setTranslateX(graph.getWidth() / 2);
@@ -86,38 +72,30 @@ public class DroneNetworkVisualization3D extends Application {
         light.setTranslateZ(graph.getLength() / 2);
         root.getChildren().addAll(ambient, light);
 
-        // 1) Bottom floor at y = 0 with 50m x 50m squares
         Group bottomFloor = createBottomFloor(graph.getWidth(), graph.getLength(), 50);
         root.getChildren().add(bottomFloor);
 
-        // 2) Removed bounding box to avoid vertical lines
-        // (Grid already provides the outline at ground level)
-
         addAxisLabels(root);
 
-        // 3) Draw nodes on the X-Z plane (y = 0 in JavaFX)
         for (SpatialNode node : graph.getNodes()) {
             Sphere sphere = new Sphere(5);
             sphere.setTranslateX(node.getX());
-            sphere.setTranslateY(0); // Force all nodes to y = 0 (X-Z plane)
+            sphere.setTranslateY(0);
             sphere.setTranslateZ(node.getZ());
 
             PhongMaterial mat = new PhongMaterial();
-            // Set color based on node type
-            if (node instanceof FireSite) {
-                mat.setDiffuseColor(Color.RED); // Fire sites are red
+            if (node instanceof ServicePoint) {
+                mat.setDiffuseColor(Color.RED);
             } else if (node instanceof DroneNode && node.getX() == 0 && node.getY() == 0 && node.getZ() == 0) {
-                mat.setDiffuseColor(Color.BLUE); // Origin node (DroneNode at 0,0,0) is blue
-            } else if (node instanceof RendezvousPoint) {
-                mat.setDiffuseColor(Color.ORANGE); // Refill stations are orange
+                mat.setDiffuseColor(Color.BLUE);
             } else {
-                mat.setDiffuseColor(Color.BLUE); // Other nodes are blue
+                mat.setDiffuseColor(Color.BLUE);
             }
-            String label = String.valueOf(graph.getNodes().indexOf(node) + 1); // Numbered labels
+            String label = String.valueOf(graph.getNodes().indexOf(node) + 1);
 
             sphere.setMaterial(mat);
 
-            final SpatialNode finalNode = node; // Final variable for lambda
+            final SpatialNode finalNode = node;
             sphere.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {
                     lookAtNode(finalNode);
@@ -128,14 +106,12 @@ public class DroneNetworkVisualization3D extends Application {
             addLabel(root, node, label);
         }
 
-        // 4) Draw edges (cords) based on the route (sequential connections at y = 0)
         int edgeCount = 0;
         if (route != null && !route.isEmpty()) {
             for (int i = 0; i < route.size() - 1; i++) {
                 SpatialNode from = route.get(i);
                 SpatialNode to = route.get(i + 1);
                 if (from != null && to != null) {
-                    // Draw edges at y = 0 for the network graph
                     Cylinder edge = createLine3D(
                             from.getX(), 0, from.getZ(),
                             to.getX(), 0, to.getZ(),
@@ -150,7 +126,6 @@ public class DroneNetworkVisualization3D extends Application {
         }
         System.out.println("Total edges added: " + edgeCount);
 
-        // 5) Draw route as a continuous flight path using all route points
         int lineCount = 0;
         if (route != null && !route.isEmpty()) {
             for (int i = 0; i < route.size() - 1; i++) {
@@ -159,13 +134,14 @@ public class DroneNetworkVisualization3D extends Application {
                 if (from != null && to != null) {
                     double fromY = (from instanceof Waypoint) ? from.getY() : 0;
                     double toY = (to instanceof Waypoint) ? to.getY() : 0;
+                    fromY = Math.max(fromY, 0);
+                    toY = Math.max(toY, 0);
                     Cylinder cyl = createLine3D(
                             from.getX(), fromY, from.getZ(),
                             to.getX(), toY, to.getZ(),
-                            Color.DODGERBLUE, 2.0 // Reduced thickness for smoother appearance
+                            Color.DODGERBLUE, 2.0
                     );
                     if (cyl != null) {
-                        // Adjust cylinder to overlap slightly for continuity
                         cyl.setTranslateX(cyl.getTranslateX() + (to.getX() - from.getX()) * 0.05);
                         cyl.setTranslateY(cyl.getTranslateY() + (toY - fromY) * 0.05);
                         cyl.setTranslateZ(cyl.getTranslateZ() + (to.getZ() - from.getZ()) * 0.05);
@@ -177,14 +153,13 @@ public class DroneNetworkVisualization3D extends Application {
         }
         System.out.println("Total route lines added: " + lineCount);
 
-        // 6) Setup camera pivot at the center, adjusted for ground level
-        pivotX = graph.getWidth() / 2;  // 250.0
-        pivotY = 0; // Pivot at ground level (y = 0)
-        pivotZ = graph.getLength() / 2; // 250.0
+        pivotX = graph.getWidth() / 2;
+        pivotY = 0;
+        pivotZ = graph.getLength() / 2;
 
         camera = new PerspectiveCamera(true);
         camera.setNearClip(0.1);
-        camera.setFarClip(100000); // Increased far clip to ensure visibility
+        camera.setFarClip(100000);
 
         updateCamera();
 
@@ -192,7 +167,6 @@ public class DroneNetworkVisualization3D extends Application {
         scene.setFill(Color.LIGHTSKYBLUE);
         scene.setCamera(camera);
 
-        // Handle mouse and keyboard input for better controls
         scene.setOnMousePressed(this::handleMousePressed);
         scene.setOnMouseDragged(this::handleMouseDragged);
         scene.setOnScroll(this::handleScroll);
@@ -202,8 +176,6 @@ public class DroneNetworkVisualization3D extends Application {
         primaryStage.setScene(scene);
         primaryStage.show();
     }
-
-    // ========== CAMERA CONTROL METHODS ==========
 
     private void updateCamera() {
         camera.getTransforms().clear();
@@ -220,7 +192,7 @@ public class DroneNetworkVisualization3D extends Application {
         anchorAngleY = angleY;
         anchorPanX = pivotX;
         anchorPanZ = pivotZ;
-        anchorDistance = cameraDistance; // Store current distance for middle-click zoom
+        anchorDistance = cameraDistance;
     }
 
     private void handleMouseDragged(MouseEvent e) {
@@ -228,24 +200,20 @@ public class DroneNetworkVisualization3D extends Application {
         double dy = e.getSceneY() - anchorY;
 
         if (e.getButton() == MouseButton.PRIMARY) {
-            // Left-click drag for rotation (horizontal and vertical)
             angleY = anchorAngleY + dx * ROTATION_SENSITIVITY;
-            angleX = Math.max(-90, Math.min(90, anchorAngleX - dy * ROTATION_SENSITIVITY)); // Limit vertical angle
+            angleX = Math.max(-90, Math.min(90, anchorAngleX - dy * ROTATION_SENSITIVITY));
             updateCamera();
         } else if (e.getButton() == MouseButton.SECONDARY) {
-            // Right-click drag for panning in XZ plane
             pivotX = anchorPanX - dx * PAN_SENSITIVITY;
             pivotZ = anchorPanZ - dy * PAN_SENSITIVITY;
             updateCamera();
         } else if (e.getButton() == MouseButton.MIDDLE) {
-            // Middle-click drag for zoom (adjust distance)
             cameraDistance = Math.max(50, Math.min(10000, anchorDistance - dy * ZOOM_SENSITIVITY * 10));
             updateCamera();
         }
     }
 
     private void handleScroll(ScrollEvent e) {
-        // Mouse wheel for zoom with finer control
         double delta = e.getDeltaY() * ZOOM_SENSITIVITY;
         cameraDistance = Math.max(50, Math.min(10000, cameraDistance - delta));
         updateCamera();
@@ -253,52 +221,44 @@ public class DroneNetworkVisualization3D extends Application {
 
     private void handleKeyPressed(KeyEvent e) {
         switch (e.getCode()) {
-            case LEFT:  // Rotate left
+            case LEFT:
                 angleY -= ROTATION_SENSITIVITY * 5;
                 updateCamera();
                 break;
-            case RIGHT: // Rotate right
+            case RIGHT:
                 angleY += ROTATION_SENSITIVITY * 5;
                 updateCamera();
                 break;
-            case UP:    // Tilt up (within limits)
+            case UP:
                 angleX = Math.max(-90, angleX - ROTATION_SENSITIVITY * 5);
                 updateCamera();
                 break;
-            case DOWN:  // Tilt down (within limits)
+            case DOWN:
                 angleX = Math.min(90, angleX + ROTATION_SENSITIVITY * 5);
                 updateCamera();
                 break;
-            case W:     // Zoom in
+            case W:
                 cameraDistance = Math.max(50, cameraDistance - ZOOM_SENSITIVITY * 20);
                 updateCamera();
                 break;
-            case S:     // Zoom out
+            case S:
                 cameraDistance = Math.min(10000, cameraDistance + ZOOM_SENSITIVITY * 20);
                 updateCamera();
                 break;
         }
     }
 
-    /**
-     * Jump the camera pivot to this node’s coordinates, so user "flies" there.
-     */
     private void lookAtNode(SpatialNode node) {
         pivotX = node.getX();
-        pivotY = 0; // Force pivot to ground level
+        pivotY = 0;
         pivotZ = node.getZ();
         updateCamera();
     }
 
-    // ========== GRID + UTILS ==========
-
-    /**
-     * Create a bottom floor at y = 0 with 50m x 50m squares.
-     */
     private Group createBottomFloor(double w, double l, double spacing) {
         Group group = new Group();
-        double thickness = 0.5; // Increased thickness for visibility
-        double y = 0; // Fixed at ground level
+        double thickness = 0.5;
+        double y = 0;
 
         for (double z = 0; z <= l; z += spacing) {
             Box line = new Box(w, thickness, thickness);

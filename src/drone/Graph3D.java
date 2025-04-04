@@ -1,17 +1,18 @@
 package drone;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 
 public class Graph3D {
-    private double width, length, altitude;
-    private double transmissionRange;
+    private double width;
+    private double altitude;
+    private double length;
     private List<SpatialNode> nodes;
 
-    public Graph3D(double width, double length, double altitude, double transmissionRange) {
+    public Graph3D(double width, double altitude, double length) {
         this.width = width;
-        this.length = length;
         this.altitude = altitude;
-        this.transmissionRange = transmissionRange;
+        this.length = length;
         this.nodes = new ArrayList<>();
     }
 
@@ -19,13 +20,20 @@ public class Graph3D {
         nodes.add(node);
     }
 
-    public double getWidth() { return width; }
-    public double getLength() { return length; }
-    public double getAltitude() { return altitude; }
-    public List<SpatialNode> getNodes() { return nodes; }
+    public List<SpatialNode> getNodes() {
+        return nodes;
+    }
+
+    public double getWidth() {
+        return width;
+    }
+
+    public double getAltitude() {
+        return altitude;
+    }
+
+    public double getLength() {
+        return length;
+    }
 }
-
-
-
-
 

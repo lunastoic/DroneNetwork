@@ -1,209 +1,233 @@
 package drone;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
+import java.util.Random;
 
 /**
- * 3D route planning that supports three approaches:
- *   1) Basic Greedy (nearest neighbor based on distance)
- *   2) Energy-Based Greedy (minimizing energy cost with vertical movement)
- *   3) MST-based TSP Approximation
+ * 3D route planning for a single-agent drone in dynamic emergency scenarios.
+ * Implements Greedy and MST-based TSP Approximation algorithms.
  */
 public class Algorithms3D {
 
-    // Constants updated with DJI FlyCart 30 specs
-    private static final double ARC_PEAK = 50.0;          // Reasonable flight height (m)
-    private static final int ARC_SAMPLES = 50;            // Number of arc points
-    private static final double ONE_GALLON_KG = 3.785;    // kg per gallon
-    private static final double WATER_PER_FIRE = ONE_GALLON_KG;  // Water per fire (kg)
-    private static final double HOVER_FIRE = 30.0;        // seconds for fire hover
-    private static final double HOVER_REFILL = 60.0;      // seconds for refill hover (updated to 1 minute)
-    private static final double HOVER_BATTERY_REPLACE = 30.0; // seconds for battery replacement
-    private static final double CRUISE_SPEED = 20.0;      // m/s (FlyCart 30 max speed)
-    private static final double VERT_SPEED = 5.0;         // m/s vertical speed
-    private static final double POWER_PER_KG = 200;       // W per kg
-    private static final double DRONE_EMPTY = 10.0;       // kg (assumed drone weight)
-    private static final double MAX_WATER_PAYLOAD = 20.0; // kg (within 30 kg dual battery payload limit)
-    private static final double INITIAL_BATTERY = 3969.0; // Wh (FlyCart 30 battery)
-    private static final double BATTERY_THRESHOLD = INITIAL_BATTERY * 0.05; // 5% threshold (~198.45 Wh)
+    // Constants based on DJI FlyCart 30 specs
+    private static final int ARC_SAMPLES = 50;            // Number of arc points for smooth paths
+    private static final double HOVER_TIME = 30.0;        // Seconds for hover at each service point
+    private static final double CRUISE_SPEED = 20.0;      // m/s (max horizontal speed)
+    private static final double VERT_SPEED = 5.0;         // m/s (max ascent/descent speed)
+    private static final double POWER_PER_KG = 200;       // W per kg (assumed, as in original code)
+    private static final double DRONE_WEIGHT = 65.0;      // kg (with batteries)
+    private static final double INITIAL_BATTERY_2 = 3969.0; // Wh (dual battery mode)
+    private static final double INITIAL_BATTERY_1 = 1984.5; // Wh (single battery mode)
+    private static final double BATTERY_THRESHOLD_PERCENT = 0.05; // 5% threshold
+
+    // Random number generator for dynamic weight updates
+    private static final Random RAND = new Random();
 
     /**
      * Main entry for route planning.
-     * methodChoice: 1 = Basic Greedy, 2 = Energy-Based Greedy, 3 = MST-based TSP Approximation.
+     * methodChoice: 1 = Greedy, 3 = MST-based TSP Approximation.
+     * maxAltitude: User-inputted cruising altitude (m).
+     * numBatteries: 1 or 2, affects battery capacity.
+     * payloadWeight: 0-30 kg, affects total weight.
      */
     public static List<SpatialNode> planRoute(
             int methodChoice,
             Graph3D graph,
             DroneNode depot,
-            List<FireSite> fires,
-            List<RendezvousPoint> rendezvous,
-            double fullWaterKg
+            List<ServicePoint> servicePoints,
+            double maxAltitude,
+            int numBatteries,
+            double payloadWeight
     ) {
-        if (fullWaterKg > MAX_WATER_PAYLOAD) {
-            System.out.println("Warning: Water payload exceeds FlyCart 30 max (20 kg). Adjusting to 20 kg.");
-            fullWaterKg = MAX_WATER_PAYLOAD;
-        }
+        double initialBattery = (numBatteries == 1) ? INITIAL_BATTERY_1 : INITIAL_BATTERY_2;
+        double totalWeight = DRONE_WEIGHT + payloadWeight;
         switch (methodChoice) {
             case 1:
-                return basicGreedyRoute(depot, fires, rendezvous, fullWaterKg);
-            case 2:
-                return energyBasedRoute(graph, depot, fires, rendezvous, fullWaterKg);
+                return greedyRoute(depot, servicePoints, maxAltitude, initialBattery, totalWeight);
             case 3:
-                return mstTspApprox(graph, depot, fires, rendezvous, fullWaterKg);
+                return mstTspApprox(graph, depot, servicePoints, maxAltitude, initialBattery, totalWeight);
             default:
-                System.out.println("Invalid choice; using Basic Greedy as default.");
-                return basicGreedyRoute(depot, fires, rendezvous, fullWaterKg);
+                System.out.println("Invalid choice; using Greedy as default.");
+                return greedyRoute(depot, servicePoints, maxAltitude, initialBattery, totalWeight);
         }
     }
 
-    // ----------------- 1) Basic Greedy (Nearest Neighbor) -----------------
-    private static List<SpatialNode> basicGreedyRoute(
+    // ----------------- 1) Greedy Route -----------------
+    private static List<SpatialNode> greedyRoute(
             DroneNode depot,
-            List<FireSite> fires,
-            List<RendezvousPoint> rendezvous,
-            double fullWaterKg
+            List<ServicePoint> servicePoints,
+            double maxAltitude,
+            double initialBattery,
+            double totalWeight
     ) {
         List<SpatialNode> route = new ArrayList<>();
-        double water = fullWaterKg;
-        double battery = INITIAL_BATTERY * 3600.0; // Convert Wh to Joules (1 Wh = 3600 J)
+        double battery = initialBattery * 3600.0; // Convert Wh to Joules
+        double batteryThreshold = initialBattery * BATTERY_THRESHOLD_PERCENT * 3600.0;
         SpatialNode current = new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "DepotStart");
         route.add(current);
-        List<FireSite> unvisited = new ArrayList<>(fires);
+
+        // Ascend to max altitude at the start
+        route.addAll(createArc(current, new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+        current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
+
+        // Initialize weights for service points (simulating priority/urgency)
+        List<ServicePoint> unvisited = new ArrayList<>(servicePoints);
+        double[] weights = new double[unvisited.size()];
+        for (int i = 0; i < weights.length; i++) {
+            weights[i] = RAND.nextDouble() * 9 + 1; // Random weight between 1 and 10
+        }
 
         while (!unvisited.isEmpty()) {
-            // Estimate energy cost to the next fire site
-            FireSite nextFire = null;
-            double minDist = Double.MAX_VALUE;
-            double minDistEnergy = Double.MAX_VALUE;
-            for (FireSite fs : unvisited) {
-                double dist = horizDist(current, fs);
-                double energy = estimateEnergyCost(current, fs, water);
-                if (dist < minDist) {
-                    minDist = dist;
-                    nextFire = fs;
-                    minDistEnergy = energy;
+            // Find the next service point based on distance and weight
+            ServicePoint nextPoint = null;
+            double minScore = Double.MAX_VALUE;
+            double minEnergy = Double.MAX_VALUE;
+            int nextIndex = -1;
+            for (int i = 0; i < unvisited.size(); i++) {
+                ServicePoint sp = unvisited.get(i);
+                double dist = horizDist(current, sp);
+                double energy = estimateEnergyCost(current, sp, totalWeight);
+                double score = dist / weights[i]; // Higher weight reduces score, prioritizing high-priority points
+                if (score < minScore) {
+                    minScore = score;
+                    minEnergy = energy;
+                    nextPoint = sp;
+                    nextIndex = i;
                 }
             }
 
             // Check if battery is sufficient for the next leg
-            if (battery - minDistEnergy < BATTERY_THRESHOLD * 3600.0) {
-                // Battery too low; return to depot for replacement
-                route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-                battery = INITIAL_BATTERY * 3600.0; // Reset battery
-                current = depot;
+            if (battery - minEnergy < batteryThreshold) {
+                route.addAll(createArc(current, depot, maxAltitude, ARC_SAMPLES));
+                route.addAll(createArc(new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), new Waypoint(depot.getX(), 0, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+                route.add(new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced"));
+                battery = initialBattery * 3600.0; // Reset battery
+                current = new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced");
+                route.addAll(createArc(current, new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+                current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
             }
 
-            // Check if water is sufficient
-            if (water < WATER_PER_FIRE) {
-                RendezvousPoint refill = findNearestRefill(current, rendezvous);
-                double energyToRefill = estimateEnergyCost(current, refill, water);
-                if (battery - energyToRefill < BATTERY_THRESHOLD * 3600.0) {
-                    // Battery too low; return to depot first
-                    route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
-                    route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-                    battery = INITIAL_BATTERY * 3600.0;
-                    current = depot;
-                }
-                route.addAll(createArc(current, refill, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover60sRefill"));
-                battery -= energyToRefill + HOVER_REFILL * (DRONE_EMPTY + water) * POWER_PER_KG;
-                water = fullWaterKg;
-                current = refill;
-            }
+            // Travel to the service point at max altitude, then descend to 10m
+            route.addAll(createArc(current, new Waypoint(nextPoint.getX(), maxAltitude, nextPoint.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+            current = new Waypoint(nextPoint.getX(), maxAltitude, nextPoint.getZ(), "AboveServicePoint");
+            route.addAll(createArc(current, new Waypoint(nextPoint.getX(), 10.0, nextPoint.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+            route.add(new Waypoint(nextPoint.getX(), 10.0, nextPoint.getZ(), "Hover30sService", weights[nextIndex]));
+            battery -= minEnergy + HOVER_TIME * totalWeight * POWER_PER_KG;
+            current = new Waypoint(nextPoint.getX(), 10.0, nextPoint.getZ(), "ServiceCompleted");
+            route.addAll(createArc(current, new Waypoint(nextPoint.getX(), maxAltitude, nextPoint.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+            current = new Waypoint(nextPoint.getX(), maxAltitude, nextPoint.getZ(), "CruisingAltitude");
 
-            // Travel to the fire site
-            route.addAll(createArc(current, nextFire, ARC_PEAK, ARC_SAMPLES));
-            route.add(new Waypoint(nextFire.getX(), nextFire.getY(), nextFire.getZ(), "Hover30sFire"));
-            battery -= minDistEnergy + HOVER_FIRE * (DRONE_EMPTY + water) * POWER_PER_KG;
-            water = Math.max(0, water - WATER_PER_FIRE);
-            current = nextFire;
-            unvisited.remove(nextFire);
+            // Update weights dynamically
+            unvisited.remove(nextPoint);
+            weights[nextIndex] = 0; // Visited point's weight set to 0
+            for (int i = 0; i < unvisited.size(); i++) {
+                weights[i] = Math.min(10, weights[i] + RAND.nextDouble() * 2); // Increase by up to 2, cap at 10
+            }
         }
 
         // Final return to depot
-        double energyToDepot = estimateEnergyCost(current, depot, water);
-        if (battery - energyToDepot < BATTERY_THRESHOLD * 3600.0) {
-            // Battery too low; replace before returning
-            route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
-            route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-            battery = INITIAL_BATTERY * 3600.0;
-            current = depot;
+        double energyToDepot = estimateEnergyCost(current, depot, totalWeight);
+        if (battery - energyToDepot < batteryThreshold) {
+            route.addAll(createArc(current, depot, maxAltitude, ARC_SAMPLES));
+            route.addAll(createArc(new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), new Waypoint(depot.getX(), 0, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+            route.add(new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced"));
+            battery = initialBattery * 3600.0;
+            current = new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced");
+            route.addAll(createArc(current, new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+            current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
         }
-        route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
+        route.addAll(createArc(current, depot, maxAltitude, ARC_SAMPLES));
+        route.addAll(createArc(new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), new Waypoint(depot.getX(), 0, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
         return route;
     }
 
-    // ----------------- 2) Energy-Based Greedy -----------------
-    private static List<SpatialNode> energyBasedRoute(
+    // ----------------- 3) MST-based TSP Approximation -----------------
+    private static List<SpatialNode> mstTspApprox(
             Graph3D graph,
             DroneNode depot,
-            List<FireSite> fires,
-            List<RendezvousPoint> rendezvous,
-            double fullWaterKg
+            List<ServicePoint> servicePoints,
+            double maxAltitude,
+            double initialBattery,
+            double totalWeight
     ) {
         List<SpatialNode> route = new ArrayList<>();
-        double water = fullWaterKg;
-        double battery = INITIAL_BATTERY * 3600.0; // Convert Wh to Joules
-        SpatialNode currentPos = new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "DepotStart");
-        route.add(currentPos);
-        List<FireSite> unvisited = new ArrayList<>(fires);
+        double battery = initialBattery * 3600.0;
+        double batteryThreshold = initialBattery * BATTERY_THRESHOLD_PERCENT * 3600.0;
+        SpatialNode current = new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "DepotStart");
+        route.add(current);
+
+        // Ascend to max altitude at the start
+        route.addAll(createArc(current, new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+        current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
+
+        // Initialize weights for service points
+        List<SpatialNode> unvisited = new ArrayList<>(servicePoints);
+        double[] weights = new double[unvisited.size()];
+        for (int i = 0; i < weights.length; i++) {
+            weights[i] = RAND.nextDouble() * 9 + 1; // Random weight between 1 and 10
+        }
 
         while (!unvisited.isEmpty()) {
-            FireSite nextFire = null;
-            double minEnergy = Double.MAX_VALUE;
-            for (FireSite fs : unvisited) {
-                double cost = estimateEnergyCost(currentPos, fs, water);
-                if (cost < minEnergy) {
-                    minEnergy = cost;
-                    nextFire = fs;
+            // Build MST with current weights
+            List<SpatialNode> allNodes = new ArrayList<>();
+            allNodes.add(depot);
+            allNodes.addAll(unvisited);
+            List<Edge> mstEdges = buildMST(allNodes, weights, unvisited);
+            List<SpatialNode> nodeOrder = preOrderTraversal(depot, allNodes, mstEdges);
+
+            for (int i = 1; i < nodeOrder.size(); i++) {
+                SpatialNode next = nodeOrder.get(i);
+                if (!(next instanceof ServicePoint)) continue;
+                int index = unvisited.indexOf(next);
+                if (index == -1) continue;
+
+                double energyToNext = estimateEnergyCost(current, next, totalWeight);
+                if (battery - energyToNext < batteryThreshold) {
+                    route.addAll(createArc(current, depot, maxAltitude, ARC_SAMPLES));
+                    route.addAll(createArc(new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), new Waypoint(depot.getX(), 0, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+                    route.add(new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced"));
+                    battery = initialBattery * 3600.0;
+                    current = new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced");
+                    route.addAll(createArc(current, new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+                    current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
+                }
+
+                route.addAll(createArc(current, new Waypoint(next.getX(), maxAltitude, next.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+                battery -= energyToNext;
+                current = new Waypoint(next.getX(), maxAltitude, next.getZ(), "AboveServicePoint");
+                route.addAll(createArc(current, new Waypoint(next.getX(), 10.0, next.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+                route.add(new Waypoint(next.getX(), 10.0, next.getZ(), "Hover30sService", weights[index]));
+                battery -= HOVER_TIME * totalWeight * POWER_PER_KG;
+                current = new Waypoint(next.getX(), 10.0, next.getZ(), "ServiceCompleted");
+                route.addAll(createArc(current, new Waypoint(next.getX(), maxAltitude, next.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+                current = new Waypoint(next.getX(), maxAltitude, next.getZ(), "CruisingAltitude");
+
+                // Update weights dynamically
+                unvisited.remove(next);
+                weights[index] = 0;
+                for (int j = 0; j < unvisited.size(); j++) {
+                    weights[j] = Math.min(10, weights[j] + RAND.nextDouble() * 2);
                 }
             }
-
-            if (battery - minEnergy < BATTERY_THRESHOLD * 3600.0) {
-                route.addAll(createArc(currentPos, depot, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-                battery = INITIAL_BATTERY * 3600.0;
-                currentPos = depot;
-            }
-
-            if (water < WATER_PER_FIRE) {
-                RendezvousPoint refill = findNearestRefill(currentPos, rendezvous);
-                double energyToRefill = estimateEnergyCost(currentPos, refill, water);
-                if (battery - energyToRefill < BATTERY_THRESHOLD * 3600.0) {
-                    route.addAll(createArc(currentPos, depot, ARC_PEAK, ARC_SAMPLES));
-                    route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-                    battery = INITIAL_BATTERY * 3600.0;
-                    currentPos = depot;
-                }
-                route.addAll(createArc(currentPos, refill, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover60sRefill"));
-                battery -= energyToRefill + HOVER_REFILL * (DRONE_EMPTY + water) * POWER_PER_KG;
-                water = fullWaterKg;
-                currentPos = refill;
-            }
-
-            route.addAll(createArc(currentPos, nextFire, ARC_PEAK, ARC_SAMPLES));
-            route.add(new Waypoint(nextFire.getX(), nextFire.getY(), nextFire.getZ(), "Hover30sFire"));
-            battery -= minEnergy + HOVER_FIRE * (DRONE_EMPTY + water) * POWER_PER_KG;
-            water = Math.max(0, water - WATER_PER_FIRE);
-            currentPos = nextFire;
-            unvisited.remove(nextFire);
         }
 
-        double energyToDepot = estimateEnergyCost(currentPos, depot, water);
-        if (battery - energyToDepot < BATTERY_THRESHOLD * 3600.0) {
-            route.addAll(createArc(currentPos, depot, ARC_PEAK, ARC_SAMPLES));
-            route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-            battery = INITIAL_BATTERY * 3600.0;
-            currentPos = depot;
+        double energyToDepot = estimateEnergyCost(current, depot, totalWeight);
+        if (battery - energyToDepot < batteryThreshold) {
+            route.addAll(createArc(current, depot, maxAltitude, ARC_SAMPLES));
+            route.addAll(createArc(new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), new Waypoint(depot.getX(), 0, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+            route.add(new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced"));
+            battery = initialBattery * 3600.0;
+            current = new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced");
+            route.addAll(createArc(current, new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
+            current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
         }
-        route.addAll(createArc(currentPos, depot, ARC_PEAK, ARC_SAMPLES));
+        route.addAll(createArc(current, depot, maxAltitude, ARC_SAMPLES));
+        route.addAll(createArc(new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "Temp"), new Waypoint(depot.getX(), 0, depot.getZ(), "Temp"), maxAltitude, ARC_SAMPLES));
         return route;
     }
 
-    private static double estimateEnergyCost(SpatialNode start, SpatialNode end, double water) {
+    private static double estimateEnergyCost(SpatialNode start, SpatialNode end, double totalWeight) {
         double dx = end.getX() - start.getX();
         double dy = end.getY() - start.getY();
         double dz = end.getZ() - start.getZ();
@@ -211,80 +235,33 @@ public class Algorithms3D {
         double distVert = Math.abs(dy);
         double tHoriz = distHoriz / CRUISE_SPEED;
         double tVert = distVert / VERT_SPEED;
-        double weight = DRONE_EMPTY + water;
-        return (tHoriz + tVert) * weight * POWER_PER_KG;
+        return (tHoriz + tVert) * totalWeight * POWER_PER_KG;
     }
 
-    // ----------------- 3) MST-Based TSP Approximation -----------------
-    private static List<SpatialNode> mstTspApprox(
-            Graph3D graph,
-            DroneNode depot,
-            List<FireSite> fires,
-            List<RendezvousPoint> rendezvous,
-            double fullWaterKg
-    ) {
-        List<SpatialNode> allNodes = new ArrayList<>();
-        allNodes.add(depot);
-        allNodes.addAll(fires);
-        allNodes.addAll(rendezvous);
-
-        List<Edge> mstEdges = buildMST(allNodes);
-        List<SpatialNode> nodeOrder = preOrderTraversal(depot, allNodes, mstEdges);
-
-        List<SpatialNode> route = new ArrayList<>();
-        double water = fullWaterKg;
-        double battery = INITIAL_BATTERY * 3600.0;
-        SpatialNode current = new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "DepotStart");
-        route.add(current);
-
-        for (int i = 1; i < nodeOrder.size(); i++) {
-            SpatialNode next = nodeOrder.get(i);
-            double energyToNext = estimateEnergyCost(current, next, water);
-            if (battery - energyToNext < BATTERY_THRESHOLD * 3600.0) {
-                route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-                battery = INITIAL_BATTERY * 3600.0;
-                current = depot;
-            }
-
-            if (water < WATER_PER_FIRE) {
-                RendezvousPoint refill = findNearestRefill(current, rendezvous);
-                double energyToRefill = estimateEnergyCost(current, refill, water);
-                if (battery - energyToRefill < BATTERY_THRESHOLD * 3600.0) {
-                    route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
-                    route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-                    battery = INITIAL_BATTERY * 3600.0;
-                    current = depot;
-                }
-                route.addAll(createArc(current, refill, ARC_PEAK, ARC_SAMPLES));
-                route.add(new Waypoint(refill.getX(), refill.getY(), refill.getZ(), "Hover60sRefill"));
-                battery -= energyToRefill + HOVER_REFILL * (DRONE_EMPTY + water) * POWER_PER_KG;
-                water = fullWaterKg;
-                current = refill;
-            }
-
-            route.addAll(createArc(current, next, ARC_PEAK, ARC_SAMPLES));
-            battery -= energyToNext;
-            if (next instanceof FireSite) {
-                route.add(new Waypoint(next.getX(), next.getY(), next.getZ(), "Hover30sFire"));
-                battery -= HOVER_FIRE * (DRONE_EMPTY + water) * POWER_PER_KG;
-                water = Math.max(0, water - WATER_PER_FIRE);
-            }
-            current = next;
+    private static List<SpatialNode> createArc(SpatialNode start, SpatialNode end, double arcPeak, int numSamples) {
+        List<SpatialNode> arcPoints = new ArrayList<>();
+        double x1 = start.getX(), y1 = start.getY(), z1 = start.getZ();
+        double x2 = end.getX(), y2 = end.getY(), z2 = end.getZ();
+        for (int i = 1; i <= numSamples; i++) {
+            double t = (double) i / numSamples;
+            double x = x1 + t * (x2 - x1);
+            double z = z1 + t * (z2 - z1);
+            double baseY = (1 - t) * y1 + t * y2;
+            double offsetY = -4 * arcPeak * t * (1 - t);
+            double y = baseY + offsetY;
+            if (y < 0) y = 0; // Ensure Y doesn't go below grid
+            arcPoints.add(new Waypoint(x, y, z, "ArcSegment"));
         }
-
-        double energyToDepot = estimateEnergyCost(current, depot, water);
-        if (battery - energyToDepot < BATTERY_THRESHOLD * 3600.0) {
-            route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
-            route.add(new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "Hover30sBatteryReplace"));
-            battery = INITIAL_BATTERY * 3600.0;
-            current = depot;
-        }
-        route.addAll(createArc(current, depot, ARC_PEAK, ARC_SAMPLES));
-        return route;
+        return arcPoints;
     }
 
-    private static List<Edge> buildMST(List<SpatialNode> nodes) {
+    private static double horizDist(SpatialNode a, SpatialNode b) {
+        double dx = a.getX() - b.getX();
+        double dz = a.getZ() - b.getZ();
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    private static List<Edge> buildMST(List<SpatialNode> nodes, double[] weights, List<SpatialNode> unvisited) {
         List<Edge> mst = new ArrayList<>();
         if (nodes.isEmpty()) return mst;
         SpatialNode start = nodes.get(0);
@@ -297,6 +274,10 @@ public class Algorithms3D {
                 for (SpatialNode u : nodes) {
                     if (!visited.contains(u)) {
                         double cost = estimateSimpleDist(v, u);
+                        int index = unvisited.indexOf(u);
+                        if (index != -1) {
+                            cost /= weights[index]; // Higher weight reduces cost
+                        }
                         edges.add(new Edge(v, u, cost));
                     }
                 }
@@ -362,46 +343,17 @@ public class Algorithms3D {
         }
     }
 
-    // ----------------- Common Helper Methods -----------------
-    private static List<SpatialNode> createArc(SpatialNode start, SpatialNode end, double arcPeak, int numSamples) {
-        List<SpatialNode> arcPoints = new ArrayList<>();
-        double x1 = start.getX(), y1 = start.getY(), z1 = start.getZ();
-        double x2 = end.getX(), y2 = end.getY(), z2 = end.getZ();
-        for (int i = 1; i <= numSamples; i++) {
-            double t = (double) i / numSamples;
-            double x = x1 + t * (x2 - x1);
-            double z = z1 + t * (z2 - z1);
-            double baseY = (1 - t) * y1 + t * y2;
-            double offsetY = -4 * arcPeak * t * (1 - t);
-            double y = baseY + offsetY;
-            arcPoints.add(new Waypoint(x, y, z, "ArcSegment"));
-        }
-        return arcPoints;
-    }
-
-    private static RendezvousPoint findNearestRefill(SpatialNode current, List<RendezvousPoint> rvs) {
-        return rvs.stream()
-                .min(Comparator.comparingDouble(r -> horizDist(current, r)))
-                .orElse(null);
-    }
-
-    private static double horizDist(SpatialNode a, SpatialNode b) {
-        double dx = a.getX() - b.getX();
-        double dz = a.getZ() - b.getZ();
-        return Math.sqrt(dx * dx + dz * dz);
-    }
-
     /**
-     * Calculate energy consumption along the route.
-     * Prints a summary at each key node (hover at fire/refill, battery replace, or depot).
+     * Calculate metrics for the route.
+     * Returns [energy (Wh), time (s), points visited, adaptability (%)]
      */
-    public static double calculateEnergyForRoute(List<SpatialNode> route, double fullWaterKg) {
+    public static double[] calculateMetricsForRoute(List<SpatialNode> route, int totalPoints) {
         double totalJoules = 0;
-        double water = fullWaterKg;
         double totalDistance = 0;
         double cumulativeFlightTime = 0;
-        double initialBattery = INITIAL_BATTERY; // Wh
-        double currentBattery = initialBattery * 3600.0; // Joules
+        int pointsVisited = 0;
+        List<Double> visitWeights = new ArrayList<>();
+
         System.out.println("\n--- Drone Mission Summary ---");
         for (int i = 0; i < route.size() - 1; i++) {
             SpatialNode from = route.get(i);
@@ -422,33 +374,38 @@ public class Algorithms3D {
             }
             double flightTime = tHoriz + tVert;
             cumulativeFlightTime += flightTime;
-            double weight = DRONE_EMPTY + water;
-            double legJoules = flightTime * weight * POWER_PER_KG;
+            double totalWeight = DRONE_WEIGHT + (to instanceof Waypoint ? ((Waypoint)to).getPayloadWeight() : 0);
+            double legJoules = flightTime * totalWeight * POWER_PER_KG;
             String label = (to instanceof Waypoint) ? ((Waypoint)to).getLabel() : "";
-            if (label.contains("Hover30sFire")) {
-                legJoules += HOVER_FIRE * weight * POWER_PER_KG;
-                water = Math.max(0, water - WATER_PER_FIRE);
-            } else if (label.contains("Hover60sRefill")) {
-                legJoules += HOVER_REFILL * weight * POWER_PER_KG;
-                water = fullWaterKg;
-            } else if (label.contains("Hover30sBatteryReplace")) {
-                legJoules += HOVER_BATTERY_REPLACE * weight * POWER_PER_KG;
-                currentBattery = initialBattery * 3600.0; // Reset battery
+            if (label.contains("Hover30sService")) {
+                legJoules += HOVER_TIME * totalWeight * POWER_PER_KG;
+                pointsVisited++;
+                if (to instanceof Waypoint) {
+                    double weight = ((Waypoint)to).getWeight();
+                    visitWeights.add(weight);
+                }
             }
             totalJoules += legJoules;
-            currentBattery -= legJoules;
-            if (currentBattery < 0) {
-                System.out.println("Warning: Battery went negative during simulation!");
-                currentBattery = 0;
-            }
-            if (label.contains("Hover30sFire") || label.contains("Hover60sRefill") || label.contains("DepotStart") || label.contains("Hover30sBatteryReplace")) {
+            if (label.contains("Hover30sService") || label.contains("DepotStart") || label.contains("DepotBatteryReplaced")) {
                 double whConsumed = totalJoules / 3600.0;
-                double batteryLeft = currentBattery / 3600.0;
-                double waterUsed = fullWaterKg - water;
-                System.out.printf("Node %2d (%s): Pos(%.1f, %.1f, %.1f) | Total Distance: %.1f m | Flight Time: %.1f s | Battery Consumed: %.2f Wh | Battery Left: %.2f Wh | Water Used: %.2f kg | Water Left: %.2f kg\n",
-                        i, label, to.getX(), to.getY(), to.getZ(), totalDistance, cumulativeFlightTime, whConsumed, batteryLeft, waterUsed, water);
+                System.out.printf("Node %2d (%s): Pos(%.1f, %.1f, %.1f) | Total Distance: %.1f m | Flight Time: %.1f s | Energy Consumed: %.2f Wh\n",
+                        i, label, to.getX(), to.getY(), to.getZ(), totalDistance, cumulativeFlightTime, whConsumed);
             }
         }
-        return totalJoules;
+
+        // Calculate adaptability: % of high-priority points (weight >= 7) visited in first 50% of visits
+        double adaptability = 0;
+        if (pointsVisited > 0) {
+            int firstHalf = (int) Math.ceil(pointsVisited / 2.0);
+            int highPriorityCount = 0;
+            for (int i = 0; i < Math.min(firstHalf, visitWeights.size()); i++) {
+                if (visitWeights.get(i) >= 7) {
+                    highPriorityCount++;
+                }
+            }
+            adaptability = (double) highPriorityCount / firstHalf * 100;
+        }
+
+        return new double[]{totalJoules / 3600.0, cumulativeFlightTime, pointsVisited, adaptability};
     }
 }

@@ -1,0 +1,9 @@
+Trial,Algorithm,Batteries,Payload,Points,Energy,Time,PointsVisited,Adaptability
+1,Greedy,1,20.00,5,3707.78,876.77,5,66.67
+1,MST-TSP,1,20.00,5,3706.51,876.42,5,0.00
+2,Greedy,1,20.00,5,3731.60,883.37,5,33.33
+2,MST-TSP,1,20.00,5,3755.57,890.00,5,100.00
+
+Scenario,Batteries,Payload,Points,Algorithm,EnergyAvg,EnergyStd,TimeAvg,TimeStd,PointsVisitedAvg,AdaptabilityAvg,AdaptabilityStd
+1b_20kg_5p,1,20.00,5,Greedy,3719.69,11.91,880.07,3.30,5.0,50.00,16.67
+1b_20kg_5p,1,20.00,5,MST-TSP,3731.04,24.53,883.21,6.79,5.0,50.00,50.00

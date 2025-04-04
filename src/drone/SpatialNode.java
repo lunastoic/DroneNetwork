@@ -1,10 +1,23 @@
 package drone;
 
-/**
- * Interface for any node with 3D coordinates.
- */
-public interface SpatialNode {
-    double getX();
-    double getY();
-    double getZ();
+public abstract class SpatialNode {
+    private double x, y, z;
+
+    public SpatialNode(double x, double y, double z) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    public double getX() {
+        return x;
+    }
+
+    public double getY() {
+        return y;
+    }
+
+    public double getZ() {
+        return z;
+    }
 }
