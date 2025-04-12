@@ -2,7 +2,7 @@ package drone;
 
 public class Waypoint extends SpatialNode {
     private String label;
-    private double weight; // Weight at the time of visit (for adaptability)
+    private double weight; // Represents the service node's payload delivery amount (if applicable)
 
     public Waypoint(double x, double y, double z, String label) {
         super(x, y, z);
@@ -24,10 +24,8 @@ public class Waypoint extends SpatialNode {
         return weight;
     }
 
-    // Add a method to get payload weight (for energy calculations)
+    // Now returns the stored weight (which is used for simulating payload drop-off)
     public double getPayloadWeight() {
-        // This is a simplification; in a real scenario, payload might vary per waypoint
-        // For now, assume payload is set by the caller (DroneEmergencySim)
-        return 0; // Will be set by DroneEmergencySim via totalWeight
+        return weight;
     }
 }

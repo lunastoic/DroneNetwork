@@ -3,6 +3,9 @@ package drone;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * Represents a 3D graph structure for the simulation, containing nodes and dimensions.
+ */
 public class Graph3D {
     private double width;
     private double altitude;
@@ -36,4 +39,3 @@ public class Graph3D {
         return length;
     }
 }
-

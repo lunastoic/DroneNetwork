@@ -1,5 +1,8 @@
 package drone;
 
+/**
+ * Abstract base class for nodes in 3D space, providing X, Y, Z coordinates.
+ */
 public abstract class SpatialNode {
     private double x, y, z;
 
