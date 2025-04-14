@@ -21,12 +21,10 @@ import java.util.List;
 
 /**
  * DroneNetworkVisualization3D:
- * 1) Draws the floor grid at y=0.
- * 2) Renders two flight paths: Greedy (blue) and MST-TSP (red), with the MST route offset by +10m in X.
- * 3) Subdivides each route segment into multiple cylinders for a smooth appearance.
- *    (We rely on the Algorithms3D clamping in createBezierArc for altitude limits.)
- * 4) The camera is flipped 180° on X so that the arcs appear above the grid.
- * 5) Labels are billboarded so they always face the viewer.
+ * - Draws a floor grid.
+ * - Renders two flight paths: Greedy (default blue) and MST-TSP (default red), with MST route offset by +10m in X.
+ * - Segments that are part of recharge legs (detected via node labels containing "Refill" or "DepotBatteryReplaced")
+ *   are drawn in gray.
  */
 public class DroneNetworkVisualization3D extends Application {
 
@@ -35,7 +33,7 @@ public class DroneNetworkVisualization3D extends Application {
     private static List<SpatialNode> routeMST;
     private static boolean isRunning = false;
 
-    // Camera parameters: pivot such that x=0 is on the left and angleY=90.
+    // Camera parameters.
     private PerspectiveCamera camera;
     private double angleX = -45;
     private double angleY = 90;
@@ -53,12 +51,11 @@ public class DroneNetworkVisualization3D extends Application {
     private static final double PAN_SENSITIVITY = 0.2;
     private static final double ZOOM_SENSITIVITY = 0.2;
 
-    // List to store text labels for billboarding.
+    // For labeling.
     private final List<Text> labelNodes = new ArrayList<>();
 
     /**
-     * Launches the visualizer with two flight paths:
-     * Greedy (blue) and MST-TSP (red) (offset by +10m in X).
+     * Launches the visualizer with the two routes.
      */
     public static void launchVisualizer(Graph3D g, List<SpatialNode> greedyRoute, List<SpatialNode> mstRoute) {
         if (g == null || greedyRoute == null || mstRoute == null) {
@@ -103,25 +100,22 @@ public class DroneNetworkVisualization3D extends Application {
         Group floorGroup = createFloorGrid(graph.getWidth(), graph.getLength(), 50);
         root.getChildren().add(floorGroup);
 
-        // Greedy route group (blue).
+        // Greedy route.
         Group greedyGroup = new Group();
         drawRoute(greedyGroup, routeGreedy, Color.BLUE);
         root.getChildren().add(greedyGroup);
 
-        // MST route group (red), offset by +10m in X.
+        // MST route with an X offset of +10.
         Group mstGroup = new Group();
         drawRoute(mstGroup, routeMST, Color.RED);
         mstGroup.getTransforms().add(new Translate(10, 0, 0));
         root.getChildren().add(mstGroup);
 
-        // Scene labels.
         addSceneLabels(root);
 
-        // Set camera pivot.
         pivotX = 0;
         pivotY = 0;
         pivotZ = 0;
-
         camera = new PerspectiveCamera(true);
         camera.setNearClip(0.1);
         camera.setFarClip(1e6);
@@ -131,7 +125,6 @@ public class DroneNetworkVisualization3D extends Application {
         scene.setFill(Color.LIGHTSKYBLUE);
         scene.setCamera(camera);
 
-        // Mouse and keyboard controls.
         scene.setOnMousePressed(this::handleMousePressed);
         scene.setOnMouseDragged(this::handleMouseDragged);
         scene.setOnScroll(this::handleScroll);
@@ -141,7 +134,6 @@ public class DroneNetworkVisualization3D extends Application {
         primaryStage.setScene(scene);
         primaryStage.show();
 
-        // Billboard text labels.
         AnimationTimer timer = new AnimationTimer() {
             @Override
             public void handle(long now) {
@@ -151,9 +143,6 @@ public class DroneNetworkVisualization3D extends Application {
         timer.start();
     }
 
-    /**
-     * Creates a floor grid at y=0.
-     */
     private Group createFloorGrid(double width, double length, double spacing) {
         Group group = new Group();
         double thickness = 0.5;
@@ -178,10 +167,12 @@ public class DroneNetworkVisualization3D extends Application {
     }
 
     /**
-     * Draws the flight path using subdivided cylinders.
+     * Draws the route.
+     * If a segment is part of a recharge (refill) leg (the destination node's label contains "Refill" or "DepotBatteryReplaced"),
+     * that segment is drawn in gray.
      */
-    private void drawRoute(Group parent, List<SpatialNode> route, Color color) {
-        // Draw nodes as spheres.
+    private void drawRoute(Group parent, List<SpatialNode> route, Color defaultColor) {
+        // Draw nodes.
         for (SpatialNode node : graph.getNodes()) {
             Sphere sphere = new Sphere(5);
             sphere.setTranslateX(node.getX());
@@ -193,39 +184,43 @@ public class DroneNetworkVisualization3D extends Application {
             } else if (node instanceof DroneNode && node.getX() == 0 && node.getY() == 0 && node.getZ() == 0) {
                 mat.setDiffuseColor(Color.BLUE);
             } else {
-                mat.setDiffuseColor(color);
+                mat.setDiffuseColor(defaultColor);
             }
             sphere.setMaterial(mat);
             parent.getChildren().add(sphere);
             addNodeLabel(parent, node);
         }
-        // Draw subdivided cylinders for the route.
+        // Draw route segments.
         if (route != null && route.size() > 1) {
             for (int i = 0; i < route.size() - 1; i++) {
                 SpatialNode from = route.get(i);
                 SpatialNode to = route.get(i + 1);
-                List<Cylinder> segs = createLineSegments3D(from, to, color, 2.0);
+                Color segColor = (isRechargeSegment(from, to)) ? Color.GRAY : defaultColor;
+                List<Cylinder> segs = createLineSegments3D(from, to, segColor, 2.0);
                 parent.getChildren().addAll(segs);
             }
         }
     }
 
+    private boolean isRechargeSegment(SpatialNode from, SpatialNode to) {
+        String fromLabel = (from instanceof Waypoint) ? ((Waypoint) from).getLabel() : "";
+        String toLabel = (to instanceof Waypoint) ? ((Waypoint) to).getLabel() : "";
+        return (fromLabel.contains("Refill") || toLabel.contains("Refill") || toLabel.contains("DepotBatteryReplaced"));
+    }
+
     private static final double SEGMENT_SPACING = 10.0;
 
-    /**
-     * Subdivides the route segment into cylinders.
-     */
     private List<Cylinder> createLineSegments3D(SpatialNode from, SpatialNode to, Color color, double radius) {
         List<Cylinder> cylinders = new ArrayList<>();
         double dx = to.getX() - from.getX();
         double dy = to.getY() - from.getY();
         double dz = to.getZ() - from.getZ();
-        double dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (dist < 1e-3) return cylinders;
-        int numSegments = (int)Math.ceil(dist / SEGMENT_SPACING);
+        int numSegments = (int) Math.ceil(dist / SEGMENT_SPACING);
         for (int i = 0; i < numSegments; i++) {
             double t0 = (double) i / numSegments;
-            double t1 = (double) (i+1) / numSegments;
+            double t1 = (double) (i + 1) / numSegments;
             double sx = from.getX() + t0 * dx;
             double sy = from.getY() + t0 * dy;
             double sz = from.getZ() + t0 * dz;
@@ -240,16 +235,13 @@ public class DroneNetworkVisualization3D extends Application {
         return cylinders;
     }
 
-    /**
-     * Creates a single cylinder between two points.
-     */
     private Cylinder createOneCylinder(double x1, double y1, double z1,
                                        double x2, double y2, double z2,
                                        Color color, double radius) {
         double dx = x2 - x1;
         double dy = y2 - y1;
         double dz = z2 - z1;
-        double length = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (length < 1e-3) return null;
         Cylinder cyl = new Cylinder(radius, length);
         cyl.setMaterial(new PhongMaterial(color));
@@ -262,7 +254,7 @@ public class DroneNetworkVisualization3D extends Application {
         if (Math.abs(dy) > 1e-3 || (Math.abs(dx) > 1e-3 && Math.abs(dz) > 1e-3)) {
             double thetaY = Math.toDegrees(Math.atan2(dx, dz));
             cyl.getTransforms().add(new Rotate(thetaY, Rotate.Y_AXIS));
-            double horizDist = Math.sqrt(dx*dx + dz*dz);
+            double horizDist = Math.sqrt(dx * dx + dz * dz);
             double thetaX = Math.toDegrees(Math.atan2(horizDist, dy)) - 90;
             cyl.getTransforms().add(new Rotate(thetaX, Rotate.X_AXIS));
         } else if (Math.abs(dz) > 1e-3) {
@@ -271,15 +263,12 @@ public class DroneNetworkVisualization3D extends Application {
         return cyl;
     }
 
-    /**
-     * Adds a text label for a node.
-     */
     private void addNodeLabel(Group parent, SpatialNode node) {
         int index = graph.getNodes().indexOf(node) + 1;
-        String labelText = index + " (" + 
+        String labelText = index + " (" +
                 String.format("%.1f, %.1f, %.1f", node.getX(), node.getY(), node.getZ()) + ")";
         if (node instanceof ServicePoint) {
-            double weight = ((ServicePoint)node).getWeight();
+            double weight = ((ServicePoint) node).getWeight();
             labelText += " W:" + String.format("%.1f", weight);
         }
         Text txt = new Text(labelText);
@@ -292,9 +281,6 @@ public class DroneNetworkVisualization3D extends Application {
         labelNodes.add(txt);
     }
 
-    /**
-     * Adds scene labels for Origin and Max.
-     */
     private void addSceneLabels(Group parent) {
         Text origin = new Text("Origin(0,0,0)");
         origin.setFont(Font.font(12));
@@ -316,10 +302,8 @@ public class DroneNetworkVisualization3D extends Application {
         labelNodes.add(corner);
     }
 
-    // ---------------- Camera and Interaction ----------------
     private void updateCamera() {
         camera.getTransforms().clear();
-        // Flip camera 180° around X so flight path appears above grid.
         camera.getTransforms().add(new Rotate(180, Rotate.X_AXIS));
         camera.getTransforms().add(new Translate(-pivotX, -pivotY, -pivotZ));
         camera.getTransforms().add(new Rotate(angleY, Rotate.Y_AXIS));
@@ -330,7 +314,6 @@ public class DroneNetworkVisualization3D extends Application {
     private void billboardLabels() {
         for (Text txt : labelNodes) {
             txt.getTransforms().clear();
-            // Apply inverse rotations to billboard text so that it always faces the camera.
             txt.getTransforms().add(new Rotate(180, Rotate.X_AXIS));
             txt.getTransforms().add(new Rotate(-angleY, Rotate.Y_AXIS));
             txt.getTransforms().add(new Rotate(-angleX, Rotate.X_AXIS));

@@ -8,10 +8,23 @@ import java.util.Random;
  * Implements Greedy (methodChoice = 1) and MST-based TSP Approximation (methodChoice = 3).
  * 
  * Key updates:
- * - Battery threshold is set to 15%.
- * - For any return to the depot (mid-route or final), a strict 4-step safe approach is enforced.
- * - In createBezierArc, if neither endpoint indicates a legitimate descent and the segment is horizontal,
- *   the altitude is forced constant (at least 50 m).
+ * - Battery threshold is set to 10%.
+ * - For final return to the depot, a strict 4-step approach is enforced:
+ *   1) Vertical move from the current altitude to maxAltitude (if needed).
+ *   2) Horizontal flight at maxAltitude directly above the depot.
+ *   3) Vertical descent from maxAltitude to 50 m.
+ *   4) Vertical descent from 50 m to 0 m.
+ * - Vertical speed: ascending at 5 m/s; descending nearly vertically at 3 m/s; descending with horizontal movement at 5 m/s.
+ * - In createBezierArc, if neither endpoint indicates a legitimate descent, Y-values are clamped to >= 50 m.
+ * - calculateMetricsForRoute returns eight values:
+ *     [0] EnergyAvg (Wh),
+ *     [1] Flight Time (s),
+ *     [2] Points Visited,
+ *     [3] Adaptability (%),
+ *     [4] Depot Returns,
+ *     [5] Total Distance (m),
+ *     [6] Average Battery Consumed (%) per sortie,
+ *     [7] Average Battery Left (%) per sortie.
  */
 public class Algorithms3D {
 
@@ -23,7 +36,8 @@ public class Algorithms3D {
     private static final double DRONE_WEIGHT = 65.0;
     private static final double INITIAL_BATTERY_2 = 3969.0;
     private static final double INITIAL_BATTERY_1 = 1984.5;
-    private static final double BATTERY_THRESHOLD_PERCENT = 0.15;
+    // Battery threshold lowered to 10%
+    private static final double BATTERY_THRESHOLD_PERCENT = 0.10;
     private static final double CURVATURE_FACTOR = 0.2;
 
     private static final Random RAND = new Random();
@@ -62,7 +76,7 @@ public class Algorithms3D {
                                                    double initialBattery,
                                                    double totalWeight) {
         List<SpatialNode> route = new ArrayList<>();
-        double battery = initialBattery * 3600.0; // Joules
+        double battery = initialBattery * 3600.0; // in Joules
         double batteryThreshold = initialBattery * BATTERY_THRESHOLD_PERCENT * 3600.0;
 
         SpatialNode current = new Waypoint(depot.getX(), depot.getY(), depot.getZ(), "DepotStart");
@@ -99,27 +113,25 @@ public class Algorithms3D {
                 }
             }
             if (battery - minEnergy < batteryThreshold) {
-                // Return to depot safely.
+                // Return to depot
                 finalReturnToDepot(route, current, depot, maxAltitude);
                 depotReturns++;
                 battery = initialBattery * 3600.0;
-                // Recharge and ascend.
-                route.addAll(createBezierArc(
-                        new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced"),
+                current = new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced");
+                route.addAll(createBezierArc(current,
                         new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "AscendAfterRecharge"),
                         ARC_SAMPLES));
                 current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
             }
-            // Approach service point at cruising altitude.
+            // Go to the next service point.
             route.addAll(createBezierArc(current,
                     new Waypoint(nextPoint.getX(), maxAltitude, nextPoint.getZ(), "Approach"),
                     ARC_SAMPLES));
             current = new Waypoint(nextPoint.getX(), maxAltitude, nextPoint.getZ(), "AboveServicePoint");
-            // Descend to 10 m for service.
+            // Descend to service altitude (10 m)
             route.addAll(createBezierArc(current,
                     new Waypoint(nextPoint.getX(), 10.0, nextPoint.getZ(), "DescentToService"),
                     ARC_SAMPLES));
-            // Add service delivery waypoint (carrying the delivered payload as weight).
             route.add(new Waypoint(nextPoint.getX(), 10.0, nextPoint.getZ(), "Hover30sService", weights[nextIndex]));
             battery -= minEnergy + HOVER_TIME * totalWeight * POWER_PER_KG;
             current = new Waypoint(nextPoint.getX(), 10.0, nextPoint.getZ(), "ServiceCompleted");
@@ -135,7 +147,7 @@ public class Algorithms3D {
                 weights[i] = Math.min(100, weights[i] + RAND.nextDouble() * 2);
             }
         }
-        // Final safe return.
+        // Final return to depot.
         finalReturnToDepot(route, current, depot, maxAltitude);
         route.add(new Waypoint(0, 0, 0, "DepotReturns", depotReturns));
         return route;
@@ -183,8 +195,8 @@ public class Algorithms3D {
                     finalReturnToDepot(route, current, depot, maxAltitude);
                     depotReturns++;
                     battery = initialBattery * 3600.0;
-                    route.addAll(createBezierArc(
-                            new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced"),
+                    current = new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced");
+                    route.addAll(createBezierArc(current,
                             new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "AscendAfterRecharge"),
                             ARC_SAMPLES));
                     current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
@@ -216,8 +228,8 @@ public class Algorithms3D {
             finalReturnToDepot(route, current, depot, maxAltitude);
             depotReturns++;
             battery = initialBattery * 3600.0;
-            route.addAll(createBezierArc(
-                    new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced"),
+            current = new Waypoint(depot.getX(), 0, depot.getZ(), "DepotBatteryReplaced");
+            route.addAll(createBezierArc(current,
                     new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "AscendAfterFinalReturn"),
                     ARC_SAMPLES));
             current = new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "CruisingAltitude");
@@ -228,7 +240,11 @@ public class Algorithms3D {
     }
 
     /**
-     * Enforces a strictly vertical and horizontal 4-step approach back to the depot.
+     * Enforces a safe 4-step return to the depot:
+     * 1) Ascend to maxAltitude if needed.
+     * 2) Fly horizontally at maxAltitude to above the depot.
+     * 3) Descend from maxAltitude to 50 m.
+     * 4) Descend from 50 m to ground level (0 m).
      */
     private static void finalReturnToDepot(List<SpatialNode> route,
                                            SpatialNode current,
@@ -240,6 +256,7 @@ public class Algorithms3D {
                     ARC_SAMPLES));
         }
         SpatialNode step1 = new Waypoint(current.getX(), maxAltitude, current.getZ(), "VerticalToMaxAlt");
+
         if (Math.abs(step1.getX() - depot.getX()) > 1e-3 || Math.abs(step1.getZ() - depot.getZ()) > 1e-3) {
             route.addAll(createBezierArc(step1,
                     new Waypoint(depot.getX(), maxAltitude, depot.getZ(), "AboveDepot"),
@@ -266,32 +283,7 @@ public class Algorithms3D {
             if (y0 < 50) y0 = 50;
             if (y2 < 50) y2 = 50;
         }
-        
-        boolean forceHorizontal = false;
-        if (start instanceof Waypoint && end instanceof Waypoint) {
-            String sl = ((Waypoint) start).getLabel();
-            String el = ((Waypoint) end).getLabel();
-            if ((sl.contains("Approach") || sl.contains("CruisingAltitude") || sl.contains("AboveServicePoint") || sl.contains("AboveDepot")) &&
-                (el.contains("Approach") || el.contains("CruisingAltitude") || el.contains("AboveServicePoint") || el.contains("AboveDepot"))) {
-                forceHorizontal = true;
-            }
-        }
-        
-        if (forceHorizontal) {
-            double fixedY = Math.max(y0, y2);
-            double x1 = (x0 + x2) / 2.0;
-            double z1 = (z0 + z2) / 2.0;
-            for (int i = 1; i <= numSamples; i++) {
-                double t = (double) i / numSamples;
-                double oneMinusT = 1 - t;
-                double x = oneMinusT * oneMinusT * x0 + 2 * oneMinusT * t * x1 + t * t * x2;
-                double y = fixedY;
-                double z = oneMinusT * oneMinusT * z0 + 2 * oneMinusT * t * z1 + t * t * z2;
-                arcPoints.add(new Waypoint(x, y, z, "ArcSegment"));
-            }
-            return arcPoints;
-        }
-        
+
         double midX = (x0 + x2) / 2.0;
         double midZ = (z0 + z2) / 2.0;
         double midY = (y0 + y2) / 2.0;
@@ -319,10 +311,11 @@ public class Algorithms3D {
     }
 
     /**
-     * Checks if a node's label indicates a legitimate descent.
+     * Determines if a node indicates a legitimate descent (for instance, if the label 
+     * includes key phrases such as "DescentToService" or "Hover30sService").
      */
     private static boolean isLegitDescent(SpatialNode node) {
-        if (!(node instanceof Waypoint)) return false;
+        if (!(node instanceof Waypoint)) return true;
         String label = ((Waypoint) node).getLabel();
         return label.contains("DescentToService")
                 || label.contains("Hover30sService")
@@ -331,21 +324,33 @@ public class Algorithms3D {
                 || label.contains("DescendToZero");
     }
 
+    /**
+     * Estimates the energy cost (in Joules) for the drone to fly between two nodes.
+     * Uses different vertical speeds for ascending and descending.
+     */
     private static double estimateEnergyCost(SpatialNode start, SpatialNode end, double totalWeight) {
         double dx = end.getX() - start.getX();
         double dy = end.getY() - start.getY();
         double dz = end.getZ() - start.getZ();
-        double distHoriz = Math.sqrt(dx * dx + dz * dz);
-        double distVert = Math.abs(dy);
+        double distHoriz = Math.sqrt(dx*dx + dz*dz);
         double tHoriz = distHoriz / CRUISE_SPEED;
-        double tVert = distVert / VERT_SPEED;
+        double tVert = 0;
+        if (dy > 0) {
+            tVert = Math.abs(dy) / VERT_SPEED;
+        } else if (dy < 0) {
+            if (distHoriz < 1e-3) {
+                tVert = Math.abs(dy) / 3.0;  // Nearly vertical descent
+            } else {
+                tVert = Math.abs(dy) / 5.0;  // Descending with horizontal movement
+            }
+        }
         return (tHoriz + tVert) * totalWeight * POWER_PER_KG;
     }
 
     private static double horizDist(SpatialNode a, SpatialNode b) {
         double dx = a.getX() - b.getX();
         double dz = a.getZ() - b.getZ();
-        return Math.sqrt(dx * dx + dz * dz);
+        return Math.sqrt(dx*dx + dz*dz);
     }
 
     private static List<Edge> buildMST(List<SpatialNode> nodes, double[] weights, List<SpatialNode> unvisited) {
@@ -388,7 +393,7 @@ public class Algorithms3D {
     private static double estimateSimpleDist(SpatialNode a, SpatialNode b) {
         double dx = a.getX() - b.getX();
         double dz = a.getZ() - b.getZ();
-        return Math.sqrt(dx * dx + dz * dz);
+        return Math.sqrt(dx*dx + dz*dz);
     }
 
     private static List<SpatialNode> preOrderTraversal(SpatialNode start, List<SpatialNode> nodes, List<Edge> mst) {
@@ -423,7 +428,6 @@ public class Algorithms3D {
     private static class Edge {
         SpatialNode a, b;
         double cost;
-
         Edge(SpatialNode a, SpatialNode b, double cost) {
             this.a = a;
             this.b = b;
@@ -432,26 +436,24 @@ public class Algorithms3D {
     }
 
     /**
-     * Calculates metrics for the route:
-     * [0] Energy (Wh),
+     * Calculates route metrics:
+     * [0] EnergyAvg (Wh),
      * [1] Flight Time (s),
-     * [2] Service Points Visited,
+     * [2] Points Visited,
      * [3] Adaptability (%),
      * [4] Depot Returns,
-     * [5] Total Distance (m)
-     * 
-     * This version simulates payload drop-off by updating currentPayload after each service delivery.
+     * [5] Total Distance (m),
+     * [6] Average Battery Consumed (%) per sortie,
+     * [7] Average Battery Left (%) per sortie.
+     * The parameter initBatteryWh is the battery capacity in Wh.
      */
-    public static double[] calculateMetricsForRoute(List<SpatialNode> route, int totalPoints, double initialPayload) {
+    public static double[] calculateMetricsForRoute(List<SpatialNode> route, int totalPoints, double initBatteryWh) {
         double totalJoules = 0;
         double cumulativeFlightTime = 0;
         int pointsVisited = 0;
         double totalDistance = 0;
-        List<Double> visitWeights = new ArrayList<>();
+        ArrayList<Double> visitWeights = new ArrayList<>();
         int depotReturns = 0;
-        
-        // Dynamic payload: start with initial payload
-        double currentPayload = initialPayload;
 
         for (int i = 0; i < route.size() - 1; i++) {
             SpatialNode from = route.get(i);
@@ -459,26 +461,27 @@ public class Algorithms3D {
             double dx = to.getX() - from.getX();
             double dy = to.getY() - from.getY();
             double dz = to.getZ() - from.getZ();
-            double legDistance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            double legDistance = Math.sqrt(dx*dx + dy*dy + dz*dz);
             totalDistance += legDistance;
-            double horiz = Math.sqrt(dx * dx + dz * dz);
+            double horiz = Math.sqrt(dx*dx + dz*dz);
             double tHoriz = horiz / CRUISE_SPEED;
-            double tVert = (Math.abs(dy) > 0.01) ? Math.abs(dy) / VERT_SPEED : 0;
+            double tVert = 0;
+            if (dy > 0) {
+                tVert = Math.abs(dy) / VERT_SPEED;
+            } else if (dy < 0) {
+                tVert = (horiz < 1e-3) ? Math.abs(dy) / 3.0 : Math.abs(dy) / 5.0;
+            }
             double flightTime = tHoriz + tVert;
             cumulativeFlightTime += flightTime;
-
-            // Use dynamic payload for energy calculation:
-            double totalW = DRONE_WEIGHT + currentPayload;
+            double totalW = DRONE_WEIGHT + (to instanceof Waypoint ? ((Waypoint) to).getPayloadWeight() : 0);
             double legJoules = flightTime * totalW * POWER_PER_KG;
             String label = (to instanceof Waypoint) ? ((Waypoint) to).getLabel() : "";
             if (label.contains("Hover30sService")) {
                 legJoules += HOVER_TIME * totalW * POWER_PER_KG;
                 pointsVisited++;
                 if (to instanceof Waypoint) {
-                    double delivered = ((Waypoint) to).getWeight();
-                    visitWeights.add(delivered);
-                    // Simulate drop-off: subtract delivered payload (not below zero)
-                    currentPayload = Math.max(0, currentPayload - delivered);
+                    double w = ((Waypoint) to).getWeight();
+                    visitWeights.add(w);
                 }
             } else if (label.contains("DepotBatteryReplaced")) {
                 depotReturns++;
@@ -487,11 +490,11 @@ public class Algorithms3D {
         }
         SpatialNode lastNode = route.get(route.size() - 1);
         if (lastNode instanceof Waypoint && ((Waypoint) lastNode).getLabel().equals("DepotReturns")) {
-            depotReturns = (int)((Waypoint) lastNode).getWeight();
+            depotReturns = (int) ((Waypoint) lastNode).getWeight();
         }
         double adaptability = 0;
         if (pointsVisited > 0) {
-            int firstHalf = (int)Math.ceil(pointsVisited / 2.0);
+            int firstHalf = (int) Math.ceil(pointsVisited / 2.0);
             int highPriorityCount = 0;
             for (int i = 0; i < Math.min(firstHalf, visitWeights.size()); i++) {
                 if (visitWeights.get(i) >= 70) highPriorityCount++;
@@ -499,7 +502,13 @@ public class Algorithms3D {
             adaptability = (double) highPriorityCount / firstHalf * 100;
         }
         double totalWh = totalJoules / 3600.0;
-        return new double[]{totalWh, cumulativeFlightTime, pointsVisited, adaptability, depotReturns, totalDistance};
+        // Each time the drone returns to the depot, the battery resets.
+        int sorties = depotReturns + 1;
+        double avgEnergyPerSortie = totalJoules / sorties; // Joules per sortie
+        double batteryConsumedFraction = avgEnergyPerSortie / (initBatteryWh * 3600);
+        double batteryConsumedPercent = batteryConsumedFraction * 100;
+        double batteryLeftPercent = 100 - batteryConsumedPercent;
+        return new double[]{totalWh, cumulativeFlightTime, pointsVisited, adaptability, depotReturns, totalDistance, batteryConsumedPercent, batteryLeftPercent};
     }
 
     public static double calculateMonetaryCost(double energyWh) {

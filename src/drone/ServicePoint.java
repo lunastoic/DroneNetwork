@@ -1,14 +1,14 @@
 package drone;
 
 /**
- * Represents a service point in the 3D space, with an initial priority weight.
+ * Represents a service point in 3D space with an associated weight, which acts as its priority.
  */
 public class ServicePoint extends SpatialNode {
-    private final double weight; // Initial priority weight
+    private final double weight; // Higher weight means higher priority
 
     public ServicePoint(double x, double y, double z) {
         super(x, y, z);
-        this.weight = 0; // Default weight
+        this.weight = 0;
     }
 
     public ServicePoint(double x, double y, double z, double weight) {
@@ -17,8 +17,7 @@ public class ServicePoint extends SpatialNode {
     }
 
     /**
-     * Gets the initial weight of the service point.
-     * @return The weight (1-100).
+     * Gets the initial priority weight.
      */
     public double getWeight() {
         return weight;
